@@ -97,6 +97,7 @@ def get_delivery_data():
                     MS_TEAMS_WEBHOOK, "Failure: Coockie expired. Bot stopped working"
                 )
             sys.exit(0)
+        return
     except requests.exceptions.HTTPError as errh:
         print("Http Error:", errh)
     except requests.exceptions.ConnectionError as errc:
@@ -110,13 +111,13 @@ def get_delivery_data():
 NOTIFICATIONS_THROTTLE = NOTIFICATIONS_TO_SEND
 while True:
     if NOTIFICATIONS_THROTTLE == 0:
-        time.sleep(sleep_long_as_informed)
         NOTIFICATIONS_THROTTLE = NOTIFICATIONS_TO_SEND
         print(f"Going to sleep for {HOURS_TO_SLEEP} hours")
         if MS_TEAMS_WEBHOOK:
             send_message_to_teams(
                 MS_TEAMS_WEBHOOK, f"Going for sleep for {HOURS_TO_SLEEP} hours"
             )
+        time.sleep(sleep_long_as_informed)
 
     today = time.ctime()
 
