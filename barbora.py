@@ -1,48 +1,15 @@
-from twilio.rest import Client
 import requests
-import os
 import json
-import re
-import time
 import sys
+import datetime
+import os
+import notifications
+import time
 
-TWILIO_ACCOUNT_ID = os.environ.get("TWILIO_ACCOUNT_ID")
-TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_ACCOUNT_AUTH_TOKEN")
-NUMBER_TO_SEND_SMS = os.environ.get("TWILIO_NUMBER_TO_SEND")
-TWILIO_OUTGOING_NUMBER = os.environ.get("TWILIO_FROM_NUMBER")
+USERNAME = os.environ["BARBORA_USERNAME"]
+PASSWORD = os.environ["BARBORA_PASSWORD"]
 
-HOURS_TO_SLEEP = int(os.environ.get("HOURS_TO_SLEEP_AFTER_GETTING_SLOT", "6"))
-
-COOKIE = os.environ["BARBORA_COOKIE"]
-MS_TEAMS_WEBHOOK = os.environ.get("MS_TEAMS_WEBHOOK")
-NOTIFICATIONS_TO_SEND = int(os.environ.get("NOTIFICATIONS_TO_SEND", "2"))
-
-
-DRY_RUN = os.environ.get("DRY_RUN")
-
-PUSH_BACK_SECONDS = int(os.environ.get("PUSH_BACK_BARBORA_API_IN_SECONDS", "30"))
-sleep_long_as_informed = HOURS_TO_SLEEP * 60 * 60 * 1
-
-
-if (
-    TWILIO_ACCOUNT_ID
-    and TWILIO_AUTH_TOKEN
-    and TWILIO_OUTGOING_NUMBER
-    and NUMBER_TO_SEND_SMS
-):
-    twilio_client = Client(TWILIO_ACCOUNT_ID, TWILIO_AUTH_TOKEN)
-    print(f"Twilio Number to send SMS: {NUMBER_TO_SEND_SMS}")
-    print(f"Twilio Outgoing Number: {TWILIO_OUTGOING_NUMBER}")
-else:
-    print(f"Twilio SMS Notifications disabled")
-
-if MS_TEAMS_WEBHOOK:
-    print(f"MS Teams Notifications Enabled")
-else:
-    print(f"MS Teams Notifications disabled")
-
-
-BARBORA_URL = "https://www.barbora.lt/api/eshop/v1/cart/deliveries"
+SESSION = requests.Session()
 
 BARBORA_HEADERS = {
     "Accept": "*/*",
@@ -55,49 +22,57 @@ BARBORA_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.132 Safari/537.36",
 }
 
-BARBORA_HEADERS["cookie"] = COOKIE
+BARBORA_URL_API = "https://barbora.lt"
+
+def get_cookie(username, password):
+    endpoint = f"{BARBORA_URL_API}/api/eshop/v1/user/login"
+    payload = dict(email=username, password=password, rememberMe='true')
+
+    SESSION.cookies.set("region", "barbora.lt")
+    response = SESSION.post(url=endpoint, data=payload, headers=BARBORA_HEADERS)
+    response.raise_for_status()
+    return response.cookies
+
+def find_slots_by_hour(slot_by_day):
+    if 'hours' not in slot_by_day:
+        print("malformed response, missing 'hours'")
+        return
+
+    slots = []
+    for slot_by_hour in slot_by_day['hours']:
+        if not slot_by_hour.get("available"):
+            continue
+        slots.append(f"{slot_by_day.get('id')} at {slot_by_hour.get('hour')}")
+    return slots
 
 
-def send_notifications():
-    if twilio_client:
-        twilio_client.messages.create(
-            to=NUMBER_TO_SEND_SMS,
-            from_=TWILIO_OUTGOING_NUMBER,
-            body=f"Barbora slot found at {today}",
-        )
+def find_free_slots(response_body):
+    if 'deliveries' not in response_body:
+        return "malformed response, missing 'deliveries'"
+    if 'params' not in response_body['deliveries'][0]:
+        return "malformed response missing 'params'"
+    if 'matrix' not in response_body['deliveries'][0]['params']:
+        return "malformed response missing 'matrix'"
 
-    if MS_TEAMS_WEBHOOK:
-        send_message_to_teams(
-            MS_TEAMS_WEBHOOK,
-            "There are slots, book now [barbora.lt](https://www.barbora.lt)",
-        )
+    slots_during_period = []
+    for slot_by_day in response_body['deliveries'][0]['params']['matrix']:
+        available_slots_by_hour = find_slots_by_hour(slot_by_day)
+        if not available_slots_by_hour:
+            continue
+        slots_during_period += available_slots_by_hour
 
-
-def send_message_to_teams(wehook, message):
-    message = {
-        "@context": "http://schema.org/extensions",
-        "@type": "MessageCard",
-        "title": "Barbora Bot",
-        "text": message,
-    }
-    requests.post(url=wehook, json=message)
+    return slots_during_period
 
 
 def get_delivery_data():
+    global COOKIE
     try:
-        r = requests.request("GET", BARBORA_URL, headers=BARBORA_HEADERS)
+        r = SESSION.get(f"{BARBORA_URL_API}/api/eshop/v1/cart/deliveries", headers=BARBORA_HEADERS, cookies=COOKIE)
         r.raise_for_status()
-        return r
+        return r.json()
     except requests.exceptions.RequestException as err:
         print("OOps: Something Else", err)
-        if r.status_code == 401:
-            print("No need to run, cookie expired - access denied")
-            if MS_TEAMS_WEBHOOK:
-                send_message_to_teams(
-                    MS_TEAMS_WEBHOOK, "Failure: Coockie expired. Bot stopped working"
-                )
-            sys.exit(0)
-        return
+        raise err
     except requests.exceptions.HTTPError as errh:
         print("Http Error:", errh)
     except requests.exceptions.ConnectionError as errc:
@@ -107,36 +82,4 @@ def get_delivery_data():
 
     return
 
-
-NOTIFICATIONS_THROTTLE = NOTIFICATIONS_TO_SEND
-while True:
-    if NOTIFICATIONS_THROTTLE == 0:
-        NOTIFICATIONS_THROTTLE = NOTIFICATIONS_TO_SEND
-        print(f"Going to sleep for {HOURS_TO_SLEEP} hours")
-        if MS_TEAMS_WEBHOOK:
-            send_message_to_teams(
-                MS_TEAMS_WEBHOOK, f"Going for sleep for {HOURS_TO_SLEEP} hours"
-            )
-        time.sleep(sleep_long_as_informed)
-
-    today = time.ctime()
-
-    if not DRY_RUN:
-        response = get_delivery_data()
-
-        try:
-            resp_str = json.dumps(response.json())
-        except Exception as e:
-            print(f"Was not able to parse response. Error: {e}")
-            continue
-
-    if DRY_RUN or re.search('"available": true', resp_str):
-        print(f"Slot found at {today}")
-        send_notifications()
-        NOTIFICATIONS_THROTTLE = NOTIFICATIONS_THROTTLE - 1
-    elif re.search('"title": null', resp_str):
-        print(f"Empty response returned at {today}")
-    else:
-        print(f"No slots at {today}")
-
-    time.sleep(PUSH_BACK_SECONDS)
+COOKIE = get_cookie(USERNAME,PASSWORD)
