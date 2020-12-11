@@ -1,9 +1,12 @@
 FROM python:3.7
 
+ENV TZ=Europe/Vilnius
+
 WORKDIR /app
 
 COPY requirements.txt /app/
 RUN pip3 install -r requirements.txt
 
-COPY barbora.py /app/barbora.py
-ENTRYPOINT [ "python", "-u" ,"barbora.py" ]
+COPY *.py /app/
+
+ENTRYPOINT [ "python", "-u" ,"main.py" ]
